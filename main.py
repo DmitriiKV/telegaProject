@@ -1,7 +1,8 @@
 import logging
-from telegram.ext import Application, MessageHandler, filters, CommandHandler
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, ConversationHandler
 from config import BOT_TOKEN
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+import aiohttp
 
 TIMER = 5
 
@@ -61,6 +62,7 @@ def remove_job_if_exists(name, context):
         job.schedule.removal()
     return True
 
+
 async def set_timer(update, context):
     chat_id = update.effective_message.chat_id
     job_removed = remove_job_if_exists(str(chat_id), context)
@@ -77,11 +79,112 @@ async def unset(update, context):
     text = 'Taimer otmena!' if job_removed else 'Aktivnaia zadacha netu'
     await update.message.reply_text(text)
 
+
 async def task(context):
     await context.bot.send_message(context.job.chat_id, f'{TIMER} secund proshel')
 
 
+async def dialog(update, context):
+    await update.message.reply_text(
+        """Kakoj-to opros
+dlja prerivanija vvedi commandu /stop
+Vopros 1: Skolko vam let?
+        """
+    )
+    return 1
 
+
+async def first_response(update, context):
+    context.user_data['local'] = update.message.text
+    await update.message.reply_text(
+        f"""
+Ja ochen rad, chto vam {context.user_data['local']} let
+kogda your den rojdenija?
+        """
+    )
+    return 2
+
+
+async def second_response(update, context):
+    context.user_data['data'] = update.message.text
+    await update.message.reply_text(
+        f"""
+        Ura, {context.user_data['data']} - eto moj lubimij den!!!!!
+I mne tozhe, kak i vam, {context.user_data['local']} let!!!!!
+Do svidanja
+Bolshe oprosa ne budet
+        """
+    )
+    return ConversationHandler.END
+
+
+async def stop(update, context):
+    await update.message.reply_text('Vot i pogovorili. Nu i ja togda pojdu')
+    return ConversationHandler.END
+
+
+conv_handler = ConversationHandler(
+    entry_points=[CommandHandler('dialog', dialog)],
+    states={
+        1: [MessageHandler(filters.TEXT & ~filters.COMMAND, first_response)],
+        2: [MessageHandler(filters.TEXT & ~filters.COMMAND, second_response)]
+    },
+    fallbacks=[CommandHandler('stop', stop)]
+)
+
+
+def get_ll_spn(toponym):
+    if not toponym:
+        return (None, None)
+    toponym_coodrinates = toponym["Point"]["pos"]
+    toponym_longitude, toponym_lattitude = toponym_coodrinates.split(" ")
+    ll = ",".join([toponym_longitude, toponym_lattitude])
+    envelope = toponym["boundedBy"]["Envelope"]
+    l, b = envelope["lowerCorner"].split(" ")
+    r, t = envelope["upperCorner"].split(" ")
+    dx = abs(float(l) - float(r)) / 2.0
+    dy = abs(float(t) - float(b)) / 2.0
+    spn = f"{dx},{dy}"
+    return ll, spn
+
+
+async def get_response(geocoder_url, params):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(geocoder_url, params=params) as response:
+            return await response.json()
+
+
+async def geocoder_map(update, context):
+    geocoder_url = 'http://geocode-maps.yandex.ru/1.x/'
+    response = await get_response(geocoder_url, params={
+        "apikey": "40d1649f-0493-4b70-98ba-98533de7710b",
+        "format": "json",
+        "geocode": update.message.text
+    })
+    toponym = response["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]
+    ll, spn = get_ll_spn(toponym)
+    static_api_request = f"http://static-maps.yandex.ru/1.x/?ll={ll}8&spn={spn}&l=map"
+    await context.bot.send_photo(
+        update.message.chat_id,
+        static_api_request,
+        caption="Vot ono v vide karty"
+    )
+
+async def geocoder_sat(update, context):
+    geocoder_url = 'http://geocode-maps.yandex.ru/1.x/'
+    response = await get_response(geocoder_url, params={
+        "apikey": "40d1649f-0493-4b70-98ba-98533de7710b",
+        "format": "json",
+        "geocode": update.message.text
+    })
+    toponym = response["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]
+    ll, spn = get_ll_spn(toponym)
+    static_api_request = f"http://static-maps.yandex.ru/1.x/?ll={ll}8&spn={spn}&l=sat"
+    await context.bot.send_photo(
+        update.message.chat_id,
+        static_api_request,
+        caption="Vot ono v vide sputnika"
+    )
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -95,7 +198,10 @@ def main():
     application.add_handler(CommandHandler("close", close_keyboard))
     application.add_handler(CommandHandler("set_timer", set_timer))
     application.add_handler(CommandHandler("unset", unset))
-    application.add_handler(text_handler)
+    application.add_handler(CommandHandler("geomap", geocoder_map))
+    application.add_handler(CommandHandler("geosat", geocoder_sat))
+    application.add_handler(conv_handler)
+    # application.add_handler(text_handler)
     application.run_polling()
 
 
